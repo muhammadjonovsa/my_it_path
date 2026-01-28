@@ -1,4 +1,7 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:pie_chart/pie_chart.dart';
 import 'package:share_plus/share_plus.dart';
@@ -9,9 +12,60 @@ void main() {
   );
 }
 
+/// ----------------------------
+/// Responsive helpers
+/// ----------------------------
+class R {
+  static double w(BuildContext c) => MediaQuery.sizeOf(c).width;
+  static double h(BuildContext c) => MediaQuery.sizeOf(c).height;
+
+  static bool isPhone(BuildContext c) => w(c) < 600;
+  static bool isTablet(BuildContext c) => w(c) >= 600 && w(c) < 1024;
+  static bool isDesktop(BuildContext c) => w(c) >= 1024;
+
+  /// Web/desktop’da kontent cho‘zilib ketmasin
+  static double maxContentWidth(BuildContext c) {
+    if (isDesktop(c)) return 860;
+    if (isTablet(c)) return 720;
+    return double.infinity;
+  }
+
+  static EdgeInsets pagePadding(BuildContext c) {
+    final width = w(c);
+    if (width >= 1024) return const EdgeInsets.all(28);
+    if (width >= 600) return const EdgeInsets.all(22);
+    return const EdgeInsets.all(18);
+  }
+
+  static int gridCountForDirections(BuildContext c) {
+    final width = w(c);
+    if (width >= 1024) return 3;
+    if (width >= 700) return 3;
+    return 2;
+  }
+
+  static double titleSize(BuildContext c) {
+    if (isDesktop(c)) return 56;
+    if (isTablet(c)) return 52;
+    return 44;
+  }
+}
+
+Future<void> shareOrCopy(BuildContext context, String text) async {
+  try {
+    await Share.share(text);
+  } catch (_) {
+    await Clipboard.setData(ClipboardData(text: text));
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Ulashish ishlamadi, matn nusxa olindi ✅")),
+      );
+    }
+  }
+}
+
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
-
 
   @override
   Widget build(BuildContext context) {
@@ -44,35 +98,73 @@ class MyApp extends StatelessWidget {
   }
 }
 
+/// ----------------------------
+/// Background + centered content wrapper
+/// ----------------------------
 class BackgroundContainer extends StatelessWidget {
   final Widget child;
 
   const BackgroundContainer({super.key, required this.child});
 
+  // Telefon uchun rasm (URL)
+  static const String mobileBg =
+      "https://i.pinimg.com/originals/0a/5a/66/0a5a66c087f6d9b6419e0e8d8c9387d4.png?nii=t";
+
+  // Kompyuter/Web uchun rasm (URL)
+  static const String desktopBg =
+      "https://static.vecteezy.com/system/resources/previews/055/176/498/non_2x/a-futuristic-blue-screen-with-a-digital-background-vector.jpg";
+
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      height: double.infinity,
-      decoration: const BoxDecoration(
-        image: DecorationImage(
-          image: AssetImage("assets/img.png"),
-          fit: BoxFit.cover,
-          colorFilter: ColorFilter.mode(Colors.black54, BlendMode.darken),
+    final size = MediaQuery.sizeOf(context);
+    final bgUrl = (size.width < 700) ? mobileBg : desktopBg;
+
+    // ✅ FIX: Stack + Positioned.fill — fon har doim ekran bo‘ylab “cover”
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Image.network(
+            bgUrl,
+            fit: BoxFit.cover,
+            alignment: Alignment.center,
+            filterQuality: FilterQuality.high,
+          ),
         ),
-      ),
-      child: child,
+        Positioned.fill(
+          child: Container(color: Colors.black54),
+        ),
+        Positioned.fill(child: child),
+      ],
     );
   }
 }
 
+/// Kontent web’da “chayilib ketmasin” uchun
+class CenteredContent extends StatelessWidget {
+  final Widget child;
+
+  const CenteredContent({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final maxW = R.maxContentWidth(context);
+    return Center(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxW),
+        child: child,
+      ),
+    );
+  }
+}
+
+/// ----------------------------
+/// Provider
+/// ----------------------------
 class QuizProvider extends ChangeNotifier {
   int _currentQuestionIndex = 0;
-
   int get currentQuestionIndex => _currentQuestionIndex;
 
   ThemeMode _themeMode = ThemeMode.system;
-
   ThemeMode get themeMode => _themeMode;
 
   void toggleTheme(bool isDark) {
@@ -99,25 +191,16 @@ class QuizProvider extends ChangeNotifier {
   ];
 
   List<Question> _shuffledQuestions = [];
-
   List<Question> get questions => _shuffledQuestions;
 
   int? _selectedOption;
+  int? get selectedOption => _selectedOption;
 
   void initializeQuiz() {
     _shuffledQuestions = List.from(originalQuestions)..shuffle();
 
-    for (var q in _shuffledQuestions) {
-      final pairs = List.generate(
-        5,
-        (i) => {'text': q.options[i], 'pointIndex': i},
-      );
-      pairs.shuffle();
-
-      q._shuffledOptions = pairs.map((p) => p['text'] as String).toList();
-      q._shuffledPointIndices = pairs
-          .map((p) => p['pointIndex'] as int)
-          .toList();
+    for (final q in _shuffledQuestions) {
+      q.shuffleOptions();
     }
 
     _currentQuestionIndex = 0;
@@ -128,17 +211,20 @@ class QuizProvider extends ChangeNotifier {
 
   void selectOption(int displayIndex, BuildContext context) {
     if (_selectedOption != null) return;
+
     _selectedOption = displayIndex;
 
     final currentQuestion = _shuffledQuestions[_currentQuestionIndex];
-    final originalIndex = currentQuestion._shuffledPointIndices[displayIndex];
-    final category = categories[originalIndex];
 
-    scores[category] = scores[category]! + 1;
+    // ✅ Endi index emas, bevosita kategoriya (shuffle bo‘lsa ham buzilmaydi)
+    final category = currentQuestion.displayOptions[displayIndex].category;
 
+    scores[category] = (scores[category] ?? 0) + 1;
     notifyListeners();
 
-    Future.delayed(const Duration(milliseconds: 800), () {
+    Future.delayed(const Duration(milliseconds: 700), () {
+      if (!context.mounted) return;
+
       if (_currentQuestionIndex < totalQuestions - 1) {
         _currentQuestionIndex++;
         _selectedOption = null;
@@ -160,8 +246,12 @@ class QuizProvider extends ChangeNotifier {
     }
   }
 
+  // ixtiyoriy: durang bo‘lsa random tanlaydi
   String getTopDirection() {
-    return scores.entries.reduce((a, b) => a.value > b.value ? a : b).key;
+    final maxVal = scores.values.reduce((a, b) => a > b ? a : b);
+    final tops = scores.entries.where((e) => e.value == maxVal).toList();
+    tops.shuffle();
+    return tops.first.key;
   }
 
   Map<String, double> get dataMap =>
@@ -176,305 +266,269 @@ class QuizProvider extends ChangeNotifier {
   }
 }
 
+/// ----------------------------
+/// Question model
+/// ----------------------------
+class OptionItem {
+  final String text;
+  final String category;
+  const OptionItem(this.text, this.category);
+}
+
 class Question {
   final String text;
-  final List<String> options;
-  final List<int> points;
+  final List<OptionItem> options;
 
-  List<String> _shuffledOptions = [];
+  late List<OptionItem> _shuffled;
 
-  List<String> get displayOptions => _shuffledOptions;
+  Question(this.text, this.options) {
+    _shuffled = List.from(options);
+  }
 
-  List<int> _shuffledPointIndices = [];
+  List<OptionItem> get displayOptions => _shuffled;
 
-  List<int> get pointIndices => _shuffledPointIndices;
-
-  Question(this.text, this.options, {required this.points})
-    : assert(options.length == points.length && points.length == 5) {
-    _shuffledOptions = List.from(options);
-    _shuffledPointIndices = List.generate(points.length, (i) => i);
+  void shuffleOptions() {
+    _shuffled = List.from(options)..shuffle();
   }
 }
 
+/// ----------------------------
+/// Questions (20 ta)
+/// ----------------------------
 List<Question> originalQuestions = [
   Question(
     "Bo‘sh vaqtingizda ko‘proq nimani qilib ketib qolganingizni sezmay qolasiz?",
-    [
-      "Biror narsani chiroyliroq qilib ko‘rish bilan",
-      "Atrofimdagi narsalarni tartibga solish bilan",
-      "Turli xil ishlarni navbatma-navbat qilib",
-      "Bosh qotiradigan masalalar bilan",
-      "Hamma narsa joyida ekanini tekshirib",
+    const [
+      OptionItem("Biror narsani chiroyliroq qilib ko‘rish bilan", "Grafik Dizayn"),
+      OptionItem("Atrofimdagi narsalarni tartibga solish bilan", "Frontend"),
+      OptionItem("Turli xil ishlarni navbatma-navbat qilib", "Flutter"),
+      OptionItem("Bosh qotiradigan masalalar bilan", "Backend"),
+      OptionItem("Hamma narsa joyida ekanini tekshirib", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Yangi joyga kirganingizda nimasi tezroq ko‘zingizga tashlanadi?",
-    [
-      "Qanday bezatilgani",
-      "Qanchalik qulay ekanligi",
-      "Qanday harakat bo‘layotgani",
-      "Ichki tartibi",
-      "Xavfsiz yoki yo‘qligi",
+    const [
+      OptionItem("Qanday bezatilgani", "Grafik Dizayn"),
+      OptionItem("Qanchalik qulay ekanligi", "Frontend"),
+      OptionItem("Qanday harakat bo‘layotgani", "Flutter"),
+      OptionItem("Ichki tartibi", "Backend"),
+      OptionItem("Xavfsiz yoki yo‘qligi", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Biror buyum sizga yoqishi uchun nimasi muhimroq?",
-    [
-      "Ko‘rinishi",
-      "Qulayligi",
-      "Har xil holatga mosligi",
-      "Uzoq xizmat qilishi",
-      "Ishonch berishi",
+    const [
+      OptionItem("Ko‘rinishi", "Grafik Dizayn"),
+      OptionItem("Qulayligi", "Frontend"),
+      OptionItem("Har xil holatga mosligi", "Flutter"),
+      OptionItem("Uzoq xizmat qilishi", "Backend"),
+      OptionItem("Ishonch berishi", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Do‘stlaringiz muammo bo‘lsa sizga qachon murojaat qilishadi?",
-    [
-      "Biror narsani chiroyli qilib berish kerak bo‘lsa",
-      "Qanday qulay ishlatishni tushunmay qolishsa",
-      "Biror ishni tezda qilib berish kerak bo‘lsa",
-      "Boshlari qotib qolsa",
-      "Ishonchli maslahat kerak bo‘lsa",
+    const [
+      OptionItem("Biror narsani chiroyli qilib berish kerak bo‘lsa", "Grafik Dizayn"),
+      OptionItem("Qanday qulay ishlatishni tushunmay qolishsa", "Frontend"),
+      OptionItem("Biror ishni tezda qilib berish kerak bo‘lsa", "Flutter"),
+      OptionItem("Boshlari qotib qolsa", "Backend"),
+      OptionItem("Ishonchli maslahat kerak bo‘lsa", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Biror ishni qilayotganda qaysi holat sizga ko‘proq yoqadi?",
-    [
-      "Natija ko‘zni quvontirsa",
-      "Odamlar qiynalmasdan foydalansa",
-      "Jarayon zeriktirmasa",
-      "Hamma narsa o‘z o‘rnida bo‘lsa",
-      "Xavotir bo‘lmasa",
+    const [
+      OptionItem("Natija ko‘zni quvontirsa", "Grafik Dizayn"),
+      OptionItem("Odamlar qiynalmasdan foydalansa", "Frontend"),
+      OptionItem("Jarayon zeriktirmasa", "Flutter"),
+      OptionItem("Hamma narsa o‘z o‘rnida bo‘lsa", "Backend"),
+      OptionItem("Xavotir bo‘lmasa", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Biror narsa ishlamay qolsa, odatda nima qilasiz?",
-    [
-      "Tashqi tomondan o‘zgartirib ko‘raman",
-      "Qanday ishlatilishini qayta ko‘rib chiqaman",
-      "Qayta-qayta sinab ko‘raman",
-      "Nega bunday bo‘lganini o‘ylab ko‘raman",
-      "Xavf yo‘qmi deb tekshiraman",
+    const [
+      OptionItem("Tashqi tomondan o‘zgartirib ko‘raman", "Grafik Dizayn"),
+      OptionItem("Qanday ishlatilishini qayta ko‘rib chiqaman", "Frontend"),
+      OptionItem("Qayta-qayta sinab ko‘raman", "Flutter"),
+      OptionItem("Nega bunday bo‘lganini o‘ylab ko‘raman", "Backend"),
+      OptionItem("Xavf yo‘qmi deb tekshiraman", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Quyidagilardan qaysi biri sizni tezroq bezovta qiladi?",
-    [
-      "Betartiblik",
-      "Noqulaylik",
-      "Sekinlik",
-      "Tushunarsizlik",
-      "Ishonchsizlik",
+    const [
+      OptionItem("Betartiblik", "Grafik Dizayn"),
+      OptionItem("Noqulaylik", "Frontend"),
+      OptionItem("Sekinlik", "Flutter"),
+      OptionItem("Tushunarsizlik", "Backend"),
+      OptionItem("Ishonchsizlik", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Qaysi muhitda o‘zingizni erkinroq his qilasiz?",
-    [
-      "Ilhom beradigan joyda",
-      "Hammasi aniq bo‘lgan joyda",
-      "Harakat ko‘p bo‘lgan joyda",
-      "Sokin va jim joyda",
-      "Nazoratli joyda",
+    const [
+      OptionItem("Ilhom beradigan joyda", "Grafik Dizayn"),
+      OptionItem("Hammasi aniq bo‘lgan joyda", "Frontend"),
+      OptionItem("Harakat ko‘p bo‘lgan joyda", "Flutter"),
+      OptionItem("Sokin va jim joyda", "Backend"),
+      OptionItem("Nazoratli joyda", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Film yoki serial ko‘rayotganda nimasi sizni ko‘proq tortadi?",
-    [
-      "Tasvir va muhit",
-      "Tushunarli voqealar",
-      "Ritmi va tezligi",
-      "Mantiqiy bog‘liqlik",
-      "Sirli tomonlari",
+    const [
+      OptionItem("Tasvir va muhit", "Grafik Dizayn"),
+      OptionItem("Tushunarli voqealar", "Frontend"),
+      OptionItem("Ritmi va tezligi", "Flutter"),
+      OptionItem("Mantiqiy bog‘liqlik", "Backend"),
+      OptionItem("Sirli tomonlari", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Sizni qaysi holat ko‘proq xursand qiladi?",
-    [
-      "Ko‘zimga yoqadigan natija",
-      "Odamlar rozi bo‘lishi",
-      "Ishlar tez yurishi",
-      "Muammo yechilishi",
-      "Xotirjamlik bo‘lishi",
+    const [
+      OptionItem("Ko‘zimga yoqadigan natija", "Grafik Dizayn"),
+      OptionItem("Odamlar rozi bo‘lishi", "Frontend"),
+      OptionItem("Ishlar tez yurishi", "Flutter"),
+      OptionItem("Muammo yechilishi", "Backend"),
+      OptionItem("Xotirjamlik bo‘lishi", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
-  // 11–20
   Question(
     "Biror ishni boshlashdan oldin ichingizda qaysi savol paydo bo‘ladi?",
-    [
-      "Chiroyli chiqadimi?",
-      "Odamlar tushuna oladimi?",
-      "Tez bitadimi?",
-      "Ichida nima bo‘lyapti?",
-      "Muammo chiqmaydimi?",
+    const [
+      OptionItem("Chiroyli chiqadimi?", "Grafik Dizayn"),
+      OptionItem("Odamlar tushuna oladimi?", "Frontend"),
+      OptionItem("Tez bitadimi?", "Flutter"),
+      OptionItem("Ichida nima bo‘lyapti?", "Backend"),
+      OptionItem("Muammo chiqmaydimi?", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Qaysi vaziyatda o‘zingizni foydaliroq his qilasiz?",
-    [
-      "Biror narsani bezab bersam",
-      "Biror ishni osonlashtirsam",
-      "Ishlar tezlashsa",
-      "Chalkashlikni yo‘qotsam",
-      "Xavfni oldini olsam",
+    const [
+      OptionItem("Biror narsani bezab bersam", "Grafik Dizayn"),
+      OptionItem("Biror ishni osonlashtirsam", "Frontend"),
+      OptionItem("Ishlar tezlashsa", "Flutter"),
+      OptionItem("Chalkashlikni yo‘qotsam", "Backend"),
+      OptionItem("Xavfni oldini olsam", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Quyidagi ishlarning qaysi biri sizga yaqinroq?",
-    [
-      "Tasavvur qilish",
-      "Tushuntirib berish",
-      "Harakat qilish",
-      "Tahlil qilish",
-      "Kuzatib turish",
+    const [
+      OptionItem("Tasavvur qilish", "Grafik Dizayn"),
+      OptionItem("Tushuntirib berish", "Frontend"),
+      OptionItem("Harakat qilish", "Flutter"),
+      OptionItem("Tahlil qilish", "Backend"),
+      OptionItem("Kuzatib turish", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Biror narsani baholayotganda nimaga qaraysiz?",
-    [
-      "Ko‘zimga yoqadimi",
-      "Foydalanish osonmi",
-      "Qanday ishlaydi",
-      "Ichidan puxtami",
-      "Ishonchlimi",
+    const [
+      OptionItem("Ko‘zimga yoqadimi", "Grafik Dizayn"),
+      OptionItem("Foydalanish osonmi", "Frontend"),
+      OptionItem("Qanday ishlaydi", "Flutter"),
+      OptionItem("Ichidan puxtami", "Backend"),
+      OptionItem("Ishonchlimi", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Qachon o‘zingizdan mamnun bo‘lasiz?",
-    [
-      "Natija chiroyli bo‘lsa",
-      "Odamlar qiynalmasa",
-      "Ish tez bitsa",
-      "Muammo qolmasa",
-      "Xavotir bo‘lmasa",
+    const [
+      OptionItem("Natija chiroyli bo‘lsa", "Grafik Dizayn"),
+      OptionItem("Odamlar qiynalmasa", "Frontend"),
+      OptionItem("Ish tez bitsa", "Flutter"),
+      OptionItem("Muammo qolmasa", "Backend"),
+      OptionItem("Xavotir bo‘lmasa", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Yangi narsaga munosabatingiz qanday?",
-    [
-      "Ko‘zimga yoqsa sinab ko‘raman",
-      "Qulay bo‘lsa yetarli",
-      "Oson bo‘lsa yoqadi",
-      "Mantiqli bo‘lsa qiziq",
-      "Xavfsiz bo‘lsa ishonaman",
+    const [
+      OptionItem("Ko‘zimga yoqsa sinab ko‘raman", "Grafik Dizayn"),
+      OptionItem("Qulay bo‘lsa yetarli", "Frontend"),
+      OptionItem("Oson bo‘lsa yoqadi", "Flutter"),
+      OptionItem("Mantiqli bo‘lsa qiziq", "Backend"),
+      OptionItem("Xavfsiz bo‘lsa ishonaman", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Siz uchun yaxshi bajarilgan ish nimasi bilan bilinadi?",
-    [
-      "Ko‘rinishi bilan",
-      "Oson ishlatilishi bilan",
-      "Muammosiz ishlashi bilan",
-      "Ichidan puxta bo‘lishi bilan",
-      "Xotirjamlik berishi bilan",
+    const [
+      OptionItem("Ko‘rinishi bilan", "Grafik Dizayn"),
+      OptionItem("Oson ishlatilishi bilan", "Frontend"),
+      OptionItem("Muammosiz ishlashi bilan", "Flutter"),
+      OptionItem("Ichidan puxta bo‘lishi bilan", "Backend"),
+      OptionItem("Xotirjamlik berishi bilan", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Qaysi holatda ko‘proq asabiylashasiz?",
-    [
-      "Didga to‘g‘ri kelmasa",
-      "Noqulay bo‘lsa",
-      "Sekin bo‘lsa",
-      "Tushunarsiz bo‘lsa",
-      "Xavf sezilsa",
+    const [
+      OptionItem("Didga to‘g‘ri kelmasa", "Grafik Dizayn"),
+      OptionItem("Noqulay bo‘lsa", "Frontend"),
+      OptionItem("Sekin bo‘lsa", "Flutter"),
+      OptionItem("Tushunarsiz bo‘lsa", "Backend"),
+      OptionItem("Xavf sezilsa", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Agar biror ish sizga topshirilsa, nimaga ko‘proq e’tibor berasiz?",
-    [
-      "Qanday ko‘rinishiga",
-      "Odamlar qanday ishlatishiga",
-      "Qanchalik tez bajarilishiga",
-      "Ichki tartibiga",
-      "Xavfsizligiga",
+    const [
+      OptionItem("Qanday ko‘rinishiga", "Grafik Dizayn"),
+      OptionItem("Odamlar qanday ishlatishiga", "Frontend"),
+      OptionItem("Qanchalik tez bajarilishiga", "Flutter"),
+      OptionItem("Ichki tartibiga", "Backend"),
+      OptionItem("Xavfsizligiga", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
-
   Question(
     "Sizni eng ko‘p qoniqtiradigan holat qaysi?",
-    [
-      "Natija ko‘zni quvontirsa",
-      "Hamma tushunsa",
-      "Ishlar tez yursa",
-      "Hamma narsa joyida bo‘lsa",
-      "Xotirjam bo‘lsam",
+    const [
+      OptionItem("Natija ko‘zni quvontirsa", "Grafik Dizayn"),
+      OptionItem("Hamma tushunsa", "Frontend"),
+      OptionItem("Ishlar tez yursa", "Flutter"),
+      OptionItem("Hamma narsa joyida bo‘lsa", "Backend"),
+      OptionItem("Xotirjam bo‘lsam", "Kiberxavfsizlik"),
     ],
-    points: [1, 1, 1, 1, 1],
   ),
 ];
 
 final Map<String, Map<String, String>> directionInfo = {
   "Grafik Dizayn": {
-    "desc":
-        "Logolar, bannerlar, UI/UX dizaynlar yaratish. Eng ijodiy IT yo‘nalishi!",
+    "desc": "Logolar, bannerlar, UI/UX dizaynlar yaratish. Eng ijodiy IT yo‘nalishi!",
     "tools": "Figma, Adobe XD, Photoshop, Illustrator",
     "salary": "O‘rtacha: 200-700\$ (junior-mid)",
     "demand": "Juda yuqori",
     "difficulty": "O‘rganish oson, ijod talab qiladi",
   },
   "Frontend": {
-    "desc":
-        "Veb-saytlarning ko‘rinadigan qismini yaratish. Foydalanuvchi bilan bevosita aloqa!",
+    "desc": "Veb-saytlarning ko‘rinadigan qismini yaratish. Foydalanuvchi bilan bevosita aloqa!",
     "tools": "HTML, CSS, JavaScript, React, Vue",
     "salary": "O‘rtacha: 300-900\$",
     "demand": "Doimiy talab",
     "difficulty": "O‘rtacha qiyinlik",
   },
   "Flutter": {
-    "desc":
-        "Bitta kod bilan Android va iOS ilovalari yasash. Mobil dunyoning kelajagi!",
+    "desc": "Bitta kod bilan Android va iOS ilovalari yasash. Mobil dunyoning kelajagi!",
     "tools": "Dart, Flutter SDK",
     "salary": "O‘rtacha: 300-1000\$",
     "demand": "Tez o‘sib borayotgan",
     "difficulty": "O‘rtacha, Dartni o‘rganish kerak",
   },
   "Backend": {
-    "desc":
-        "Server, ma'lumotlar bazasi va logikani boshqarish. Saytning 'miyasi'!",
+    "desc": "Server, ma'lumotlar bazasi va logikani boshqarish. Saytning 'miyasi'!",
     "tools": "Python, Node.js, Java, PHP, SQL",
     "salary": "O‘rtacha: 300-1500\$",
     "demand": "Juda yuqori",
     "difficulty": "Qiyinroq, mantiq talab qiladi",
   },
   "Kiberxavfsizlik": {
-    "desc":
-        "Tizimlarni xakerlardan himoya qilish. Kelajakning eng muhim va yuqori maoshli sohasi!",
+    "desc": "Tizimlarni xakerlardan himoya qilish. Kelajakning eng muhim va yuqori maoshli sohasi!",
     "tools": "Kali Linux, Wireshark, Ethical Hacking",
     "salary": "O‘rtacha: 300-1200\$",
     "demand": "Eng talabgir soha",
@@ -545,6 +599,9 @@ final Map<String, List<String>> directionFacts = {
   ],
 };
 
+/// ----------------------------
+/// Welcome
+/// ----------------------------
 class WelcomeScreen extends StatelessWidget {
   const WelcomeScreen({super.key});
 
@@ -560,24 +617,27 @@ class WelcomeScreen extends StatelessWidget {
           style: const TextStyle(
             color: Colors.amber,
             fontWeight: FontWeight.bold,
-            fontSize: 26,
+            fontSize: 24,
           ),
           textAlign: TextAlign.center,
         ),
-        content: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                info["desc"]!,
-                style: const TextStyle(color: Colors.white, fontSize: 18),
-              ),
-              const SizedBox(height: 16),
-              _infoRow("Asboblar:", info["tools"]!),
-              _infoRow("O‘rtacha maosh:", info["salary"]!),
-              _infoRow("Talab:", info["demand"]!),
-              _infoRow("Qiyinlik darajasi:", info["difficulty"]!),
-            ],
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  info["desc"]!,
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                ),
+                const SizedBox(height: 14),
+                _infoRow("Asboblar:", info["tools"]!),
+                _infoRow("O‘rtacha maosh:", info["salary"]!),
+                _infoRow("Talab:", info["demand"]!),
+                _infoRow("Qiyinlik:", info["difficulty"]!),
+              ],
+            ),
           ),
         ),
         actions: [
@@ -601,12 +661,12 @@ class WelcomeScreen extends StatelessWidget {
               style: const TextStyle(
                 fontWeight: FontWeight.bold,
                 color: Colors.amber,
-                fontSize: 16,
+                fontSize: 15,
               ),
             ),
             TextSpan(
               text: " $value",
-              style: const TextStyle(color: Colors.white, fontSize: 16),
+              style: const TextStyle(color: Colors.white, fontSize: 15),
             ),
           ],
         ),
@@ -633,147 +693,147 @@ class WelcomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final pad = R.pagePadding(context);
+
     return Scaffold(
       body: BackgroundContainer(
         child: SafeArea(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              children: [
-                Align(
-                  alignment: Alignment.topRight,
-                  child: Consumer<QuizProvider>(
-                    builder: (context, quiz, _) => IconButton(
-                      icon: Icon(
-                        quiz.themeMode == ThemeMode.dark
-                            ? Icons.light_mode
-                            : Icons.dark_mode,
-                        color: Colors.white,
-                      ),
-                      onPressed: () =>
-                          quiz.toggleTheme(quiz.themeMode != ThemeMode.dark),
+          child: CenteredContent(
+            child: SingleChildScrollView(
+              padding: pad,
+              child: Column(
+                children: [
+                  const SizedBox(height: 12),
+                  Text(
+                    "IT Yo‘lim",
+                    style: TextStyle(
+                      fontSize: R.titleSize(context),
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      shadows: const [
+                        Shadow(
+                          blurRadius: 20,
+                          color: Colors.black45,
+                          offset: Offset(0, 4),
+                        ),
+                      ],
                     ),
                   ),
-                ),
-                const SizedBox(height: 30),
-                const Text(
-                  "IT Yo‘lim",
-                  style: TextStyle(
-                    fontSize: 60,
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    shadows: [
-                      Shadow(
-                        blurRadius: 20,
-                        color: Colors.black45,
-                        offset: Offset(0, 4),
-                      ),
-                    ],
+                  const SizedBox(height: 10),
+                  const Text(
+                    "O‘zingizga eng mos IT yo‘nalishini toping!",
+                    style: TextStyle(fontSize: 18, color: Colors.white),
+                    textAlign: TextAlign.center,
                   ),
-                ),
-                const SizedBox(height: 16),
-                const Text(
-                  "O‘zingizga eng mos IT yo‘nalishini toping!",
-                  style: TextStyle(fontSize: 22, color: Colors.white),
-                ),
-                const SizedBox(height: 40),
-                const Text(
-                  "Yo‘nalishlar haqida batafsil ma’lumot:",
-                  style: TextStyle(fontSize: 20, color: Colors.white70),
-                ),
-                const SizedBox(height: 10),
-                GridView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 2,
-                    childAspectRatio: 1.1,
+                  const SizedBox(height: 26),
+                  const Text(
+                    "Yo‘nalishlar haqida batafsil ma’lumot:",
+                    style: TextStyle(fontSize: 16, color: Colors.white70),
                   ),
-                  itemCount: directionInfo.keys.length,
-                  itemBuilder: (context, index) {
-                    final dir = directionInfo.keys.elementAt(index);
-                    return GestureDetector(
-                      onTap: () => showDirectionInfo(context, dir),
-                      child: Card(
-                        color: Colors.white.withOpacity(0.15),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
+                  const SizedBox(height: 10),
+                  GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: R.gridCountForDirections(context),
+                      childAspectRatio: R.isPhone(context) ? 1.15 : 1.35,
+                      mainAxisSpacing: 12,
+                      crossAxisSpacing: 12,
+                    ),
+                    itemCount: directionInfo.keys.length,
+                    itemBuilder: (context, index) {
+                      final dir = directionInfo.keys.elementAt(index);
+                      return InkWell(
+                        borderRadius: BorderRadius.circular(16),
+                        onTap: () => showDirectionInfo(context, dir),
+                        child: Card(
+                          color: Colors.white.withOpacity(0.14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(14),
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(_getIcon(dir),
+                                    size: 44, color: Colors.amber),
+                                const SizedBox(height: 10),
+                                Text(
+                                  dir,
+                                  style: const TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white,
+                                  ),
+                                  textAlign: TextAlign.center,
+                                ),
+                                const SizedBox(height: 6),
+                                const Text(
+                                  "Batafsil →",
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: Colors.white70,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
-                        child: Padding(
-                          padding: const EdgeInsets.all(16),
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(
-                                _getIcon(dir),
-                                size: 50,
-                                color: Colors.amber,
-                              ),
-                              const SizedBox(height: 12),
-                              Text(
-                                dir,
-                                style: const TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.white,
-                                ),
-                                textAlign: TextAlign.center,
-                              ),
-                              const SizedBox(height: 8),
-                              const Text(
-                                "Batafsil →",
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  color: Colors.white70,
-                                ),
-                              ),
-                            ],
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 28),
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    spacing: 12,
+                    runSpacing: 12,
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          Provider.of<QuizProvider>(context, listen: false)
+                              .initializeQuiz();
+                          Navigator.pushReplacement(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => const QuizScreen()),
+                          );
+                        },
+                        icon: const Icon(Icons.play_arrow_rounded, size: 30),
+                        label: const Text(
+                          "Testni boshlash",
+                          style: TextStyle(fontSize: 18),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 26,
+                            vertical: 16,
+                          ),
+                          shape: const StadiumBorder(),
+                          elevation: 10,
+                        ),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () => shareOrCopy(
+                          context,
+                          "Siz qachon tushunib yetasiz IT kelajak kasb ekanligini? Saytga kiring va o‘zingizga mos IT yo‘nalishini toping! 🚀\n@codialuz",
+                        ),
+                        icon: const Icon(Icons.share),
+                        label: const Text("Do‘stlarga ulashish"),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          side: const BorderSide(color: Colors.white),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 18,
+                            vertical: 14,
                           ),
                         ),
                       ),
-                    );
-                  },
-                ),
-                const SizedBox(height: 50),
-                ElevatedButton.icon(
-                  onPressed: () {
-                    Provider.of<QuizProvider>(
-                      context,
-                      listen: false,
-                    ).initializeQuiz();
-                    Navigator.pushReplacement(
-                      context,
-                      MaterialPageRoute(builder: (_) => const QuizScreen()),
-                    );
-                  },
-                  icon: const Icon(Icons.play_arrow_rounded, size: 36),
-                  label: const Text(
-                    "Testni boshlash",
-                    style: TextStyle(fontSize: 24),
+                    ],
                   ),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 60,
-                      vertical: 20,
-                    ),
-                    shape: const StadiumBorder(),
-                    elevation: 15,
-                  ),
-                ),
-                const SizedBox(height: 30),
-                OutlinedButton.icon(
-                  onPressed: () => Share.share(
-                    "Siz qachon tushunib yetasiz IT kelajak kasb ekanligini saytga kiring va ozingizga mos IT yo‘nalishini toping! 🚀\n@codialuz",
-                  ),
-                  icon: const Icon(Icons.share),
-                  label: const Text("Do‘stlarga ulashish"),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.white,
-                    side: const BorderSide(color: Colors.white),
-                  ),
-                ),
-                const SizedBox(height: 40),
-              ],
+                  const SizedBox(height: 18),
+                ],
+              ),
             ),
           ),
         ),
@@ -782,6 +842,9 @@ class WelcomeScreen extends StatelessWidget {
   }
 }
 
+/// ----------------------------
+/// Quiz
+/// ----------------------------
 class QuizScreen extends StatelessWidget {
   const QuizScreen({super.key});
 
@@ -789,189 +852,205 @@ class QuizScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       body: BackgroundContainer(
-        child: Consumer<QuizProvider>(
-          builder: (context, quiz, child) {
-            final question = quiz.questions[quiz.currentQuestionIndex];
-            return SafeArea(
-              child: Column(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          "Savol ${quiz.currentQuestionIndex + 1}/20",
-                          style: const TextStyle(
-                            fontSize: 20,
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(
-                            Icons.restart_alt,
-                            color: Colors.white,
-                          ),
-                          onPressed: () async {
-                            bool? confirm = await showDialog(
-                              context: context,
-                              builder: (_) => AlertDialog(
-                                backgroundColor: Colors.deepPurple.shade800,
-                                title: const Text(
-                                  "Qayta boshlash?",
-                                  style: TextStyle(color: Colors.white),
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () =>
-                                        Navigator.pop(context, false),
-                                    child: const Text("Yo‘q"),
-                                  ),
-                                  TextButton(
-                                    onPressed: () =>
-                                        Navigator.pop(context, true),
-                                    child: const Text("Ha"),
-                                  ),
-                                ],
-                              ),
-                            );
-                            if (confirm == true) {
-                              quiz.reset();
-                              Navigator.pushReplacement(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (_) => const WelcomeScreen(),
-                                ),
-                              );
-                            }
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                  LinearProgressIndicator(
-                    value: (quiz.currentQuestionIndex + 1) / 20,
-                    minHeight: 8,
-                    color: Colors.amber,
-                    backgroundColor: Colors.white24,
-                  ),
-                  const SizedBox(height: 30),
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 20),
-                      child: Column(
+        child: SafeArea(
+          child: CenteredContent(
+            child: Consumer<QuizProvider>(
+              builder: (context, quiz, child) {
+                final question = quiz.questions[quiz.currentQuestionIndex];
+
+                return Padding(
+                  padding: R.pagePadding(context),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Text(
-                            question.text,
+                            "Savol ${quiz.currentQuestionIndex + 1}/20",
                             style: const TextStyle(
-                              fontSize: 26,
+                              fontSize: 18,
                               color: Colors.white,
                               fontWeight: FontWeight.bold,
                             ),
-                            textAlign: TextAlign.center,
                           ),
-                          const SizedBox(height: 40),
-                          Expanded(
-                            child: ListView.builder(
-                              itemCount: question.displayOptions.length,
-                              itemBuilder: (context, i) {
-                                final selected = quiz._selectedOption == i;
-                                return Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 10,
-                                  ),
-                                  child: AnimatedScale(
-                                    scale: selected ? 1.04 : 1.0,
-                                    duration: const Duration(milliseconds: 200),
-                                    curve: Curves.easeOut,
-                                    child: GestureDetector(
-                                      onTap: () =>
-                                          quiz.selectOption(i, context),
-                                      child: Card(
-                                        elevation: selected ? 8 : 2,
-                                        color: selected
-                                            ? Colors.deepPurple.shade700
-                                                  .withOpacity(0.75)
-                                            : Colors.white.withOpacity(0.15),
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            16,
-                                          ),
-                                        ),
-                                        child: Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                            vertical: 18,
-                                            horizontal: 20,
-                                          ),
-                                          child: Row(
-                                            children: [
-                                              Icon(
-                                                selected
-                                                    ? Icons.check_circle_rounded
-                                                    : Icons.circle_outlined,
-                                                color: selected
-                                                    ? Colors
-                                                          .greenAccent
-                                                          .shade400
-                                                    : Colors.white70,
-                                                size: 28,
-                                              ),
-                                              const SizedBox(width: 16),
-                                              Expanded(
-                                                child: Text(
-                                                  question.displayOptions[i],
-                                                  style: const TextStyle(
-                                                    fontSize: 18,
-                                                    color: Colors.white,
-                                                    height: 1.3,
-                                                  ),
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
+                          Row(
+                            children: [
+                              if (quiz.currentQuestionIndex > 0)
+                                IconButton(
+                                  tooltip: "Orqaga",
+                                  onPressed: quiz.previousQuestion,
+                                  icon: const Icon(Icons.arrow_back,
+                                      color: Colors.white),
+                                ),
+                              IconButton(
+                                tooltip: "Qayta boshlash",
+                                icon: const Icon(Icons.restart_alt,
+                                    color: Colors.white),
+                                onPressed: () async {
+                                  final confirm = await showDialog<bool>(
+                                    context: context,
+                                    builder: (_) => AlertDialog(
+                                      backgroundColor:
+                                      Colors.deepPurple.shade800,
+                                      title: const Text(
+                                        "Qayta boshlash?",
+                                        style: TextStyle(color: Colors.white),
                                       ),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () =>
+                                              Navigator.pop(context, false),
+                                          child: const Text("Yo‘q"),
+                                        ),
+                                        TextButton(
+                                          onPressed: () =>
+                                              Navigator.pop(context, true),
+                                          child: const Text("Ha"),
+                                        ),
+                                      ],
                                     ),
-                                  ),
-                                );
-                              },
-                            ),
+                                  );
+                                  if (confirm == true) {
+                                    quiz.reset();
+                                    Navigator.pushReplacement(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) => const WelcomeScreen(),
+                                      ),
+                                    );
+                                  }
+                                },
+                              ),
+                            ],
                           ),
                         ],
                       ),
-                    ),
-                  ),
-                  if (quiz.currentQuestionIndex > 0)
-                    Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: OutlinedButton.icon(
-                          onPressed: quiz.previousQuestion,
-                          icon: const Icon(
-                            Icons.arrow_back,
-                            color: Colors.white,
+                      const SizedBox(height: 10),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: LinearProgressIndicator(
+                          value: (quiz.currentQuestionIndex + 1) / 20,
+                          minHeight: 10,
+                          color: Colors.amber,
+                          backgroundColor: Colors.white24,
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      Expanded(
+                        child: Card(
+                          color: Colors.white.withOpacity(0.10),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(18),
                           ),
-                          label: const Text(
-                            "Orqaga",
-                            style: TextStyle(color: Colors.white),
+                          child: Padding(
+                            padding: const EdgeInsets.all(18),
+                            child: Column(
+                              children: [
+                                Text(
+                                  question.text,
+                                  style: TextStyle(
+                                    fontSize: R.isPhone(context) ? 20 : 24,
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    height: 1.25,
+                                  ),
+                                  textAlign: TextAlign.center,
+                                ),
+                                const SizedBox(height: 16),
+                                Expanded(
+                                  child: ListView.builder(
+                                    itemCount: question.displayOptions.length,
+                                    itemBuilder: (context, i) {
+                                      final selected = quiz.selectedOption == i;
+
+                                      return Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          vertical: 8,
+                                        ),
+                                        child: AnimatedScale(
+                                          scale: selected ? 1.03 : 1.0,
+                                          duration:
+                                          const Duration(milliseconds: 160),
+                                          curve: Curves.easeOut,
+                                          child: InkWell(
+                                            borderRadius:
+                                            BorderRadius.circular(16),
+                                            onTap: () =>
+                                                quiz.selectOption(i, context),
+                                            child: Card(
+                                              elevation: selected ? 10 : 2,
+                                              color: selected
+                                                  ? Colors.deepPurple.shade700
+                                                  .withOpacity(0.78)
+                                                  : Colors.white
+                                                  .withOpacity(0.14),
+                                              shape: RoundedRectangleBorder(
+                                                borderRadius:
+                                                BorderRadius.circular(16),
+                                              ),
+                                              child: Padding(
+                                                padding:
+                                                const EdgeInsets.symmetric(
+                                                  vertical: 16,
+                                                  horizontal: 16,
+                                                ),
+                                                child: Row(
+                                                  children: [
+                                                    Icon(
+                                                      selected
+                                                          ? Icons
+                                                          .check_circle_rounded
+                                                          : Icons
+                                                          .circle_outlined,
+                                                      color: selected
+                                                          ? Colors.greenAccent
+                                                          .shade400
+                                                          : Colors.white70,
+                                                      size: 26,
+                                                    ),
+                                                    const SizedBox(width: 12),
+                                                    Expanded(
+                                                      child: Text(
+                                                        question
+                                                            .displayOptions[i]
+                                                            .text,
+                                                        style: const TextStyle(
+                                                          fontSize: 16,
+                                                          color: Colors.white,
+                                                          height: 1.25,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                ],
-              ),
-            );
-          },
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
         ),
       ),
     );
   }
 }
 
-// ResultScreen ni o'zgartirmagan holda qoldirdim (agar kerak bo'lsa keyinroq so'rashingiz mumkin)
-
+/// ----------------------------
+/// Result
+/// ----------------------------
 class ResultScreen extends StatelessWidget {
   const ResultScreen({super.key});
 
@@ -1003,12 +1082,12 @@ class ResultScreen extends StatelessWidget {
               style: const TextStyle(
                 fontWeight: FontWeight.bold,
                 color: Colors.amber,
-                fontSize: 18,
+                fontSize: 16,
               ),
             ),
             TextSpan(
               text: " $value",
-              style: const TextStyle(color: Colors.white, fontSize: 17),
+              style: const TextStyle(color: Colors.white, fontSize: 15),
             ),
           ],
         ),
@@ -1020,151 +1099,272 @@ class ResultScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final quiz = Provider.of<QuizProvider>(context, listen: false);
     final topDirection = quiz.getTopDirection();
-    // final facts = directionFacts[topDirection]!;  // agar facts ishlatmoqchi bo'lsangiz qayta qo'shing
+
+    final allFacts = List<String>.from(directionFacts[topDirection] ?? const [])
+      ..shuffle();
+    final visibleFacts = allFacts.take(4).toList();
+
+    final size = MediaQuery.sizeOf(context);
+    final isPhone = R.isPhone(context);
+
+    // ✅ FIX: telefon uchun chartni kattaroq qilamiz
+    final chartSize = isPhone
+        ? math.min(380.0, size.width * 0.95)
+        : math.min(420.0, math.max(260.0, size.width * 0.62));
 
     return Scaffold(
       body: BackgroundContainer(
         child: SafeArea(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              children: [
-                const Text(
-                  "🎉 Natija tayyor!",
-                  style: TextStyle(
-                    fontSize: 40,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                  ),
-                ),
-                const SizedBox(height: 30),
-                const Text(
-                  "Sizga eng mos IT yo‘nalishi:",
-                  style: TextStyle(fontSize: 24, color: Colors.white70),
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  topDirection,
-                  style: const TextStyle(
-                    fontSize: 48,
-                    color: Colors.amber,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 40),
-
-                PieChart(
-                  dataMap: quiz.dataMap,
-                  chartRadius: MediaQuery.of(context).size.width / 1.7,
-                  colorList: const [
-                    Colors.orange,
-                    Colors.purple,
-                    Colors.teal,
-                    Colors.blue,
-                    Colors.red,
-                  ],
-                  legendOptions: const LegendOptions(
-                    legendPosition: LegendPosition.bottom,
-                    legendTextStyle: TextStyle(color: Colors.white),
-                  ),
-                  chartValuesOptions: const ChartValuesOptions(
-                    showChartValuesInPercentage: true,
-                    chartValueStyle: TextStyle(
+          child: CenteredContent(
+            child: SingleChildScrollView(
+              padding: R.pagePadding(context),
+              child: Column(
+                children: [
+                  Text(
+                    "🎉 Natija tayyor!",
+                    style: TextStyle(
+                      fontSize: R.isPhone(context) ? 30 : 36,
+                      fontWeight: FontWeight.bold,
                       color: Colors.white,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 14),
+                  const Text(
+                    "Sizga eng mos IT yo‘nalishi:",
+                    style: TextStyle(fontSize: 18, color: Colors.white70),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    topDirection,
+                    style: TextStyle(
+                      fontSize: R.isPhone(context) ? 36 : 44,
+                      color: Colors.amber,
                       fontWeight: FontWeight.bold,
                     ),
+                    textAlign: TextAlign.center,
                   ),
-                ),
+                  const SizedBox(height: 18),
 
-                const SizedBox(height: 50),
-
-                Card(
-                  color: Colors.white.withOpacity(0.2),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Icon(
-                              _getIcon(topDirection),
-                              size: 40,
-                              color: Colors.amber,
-                            ),
-                            const SizedBox(width: 12),
-                            Text(
-                              topDirection,
-                              style: const TextStyle(
-                                fontSize: 32,
-                                color: Colors.amber,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
+                  // ✅ FIX: telefonda legend pie ichida bo‘lsa doira kichrayib ketadi.
+                  // Shuning uchun: telefon -> legendni o‘chirib, pastga alohida chiqaramiz.
+                  Column(
+                    children: [
+                      SizedBox(
+                        width: chartSize,
+                        height: chartSize,
+                        child: PieChart(
+                          dataMap: quiz.dataMap,
+                          chartRadius: chartSize / 2,
+                          colorList: const [
+                            Colors.orange,
+                            Colors.purple,
+                            Colors.teal,
+                            Colors.blue,
+                            Colors.red,
                           ],
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          directionInfo[topDirection]!["desc"]!,
-                          style: const TextStyle(
-                            fontSize: 18,
-                            color: Colors.white,
+                          legendOptions: LegendOptions(
+                            showLegends: !isPhone,
+                            legendPosition: LegendPosition.bottom,
+                            legendTextStyle:
+                            const TextStyle(color: Colors.white),
+                          ),
+                          chartValuesOptions: const ChartValuesOptions(
+                            showChartValuesInPercentage: true,
+                            chartValueStyle: TextStyle(
+                              color: Colors.black,
+                              fontWeight: FontWeight.bold,
+                            ),
                           ),
                         ),
-                        const SizedBox(height: 20),
-                        _infoRow(
-                          "Asboblar:",
-                          directionInfo[topDirection]!["tools"]!,
-                        ),
-                        _infoRow(
-                          "O‘rtacha maosh:",
-                          directionInfo[topDirection]!["salary"]!,
-                        ),
-                        _infoRow(
-                          "Talab darajasi:",
-                          directionInfo[topDirection]!["demand"]!,
-                        ),
-                        _infoRow(
-                          "Qiyinlik darajasi:",
-                          directionInfo[topDirection]!["difficulty"]!,
+                      ),
+                      if (isPhone) ...[
+                        const SizedBox(height: 10),
+                        Wrap(
+                          alignment: WrapAlignment.center,
+                          spacing: 10,
+                          runSpacing: 8,
+                          children: quiz.dataMap.entries.map((e) {
+                            return Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.12),
+                                borderRadius: BorderRadius.circular(999),
+                                border: Border.all(color: Colors.white24),
+                              ),
+                              child: Text(
+                                "${e.key}: ${e.value.toInt()}",
+                                style: const TextStyle(
+                                    color: Colors.white, fontSize: 13),
+                              ),
+                            );
+                          }).toList(),
                         ),
                       ],
+                    ],
+                  ),
+
+                  const SizedBox(height: 18),
+
+                  Card(
+                    color: Colors.white.withOpacity(0.18),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(_getIcon(topDirection),
+                                  size: 38, color: Colors.amber),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  topDirection,
+                                  style: const TextStyle(
+                                    fontSize: 28,
+                                    color: Colors.amber,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            directionInfo[topDirection]?["desc"] ??
+                                "Ma'lumot topilmadi.",
+                            style: const TextStyle(
+                              fontSize: 16,
+                              color: Colors.white,
+                              height: 1.25,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          _infoRow(
+                            "Asboblar:",
+                            directionInfo[topDirection]?["tools"] ?? "-",
+                          ),
+                          _infoRow(
+                            "O‘rtacha maosh:",
+                            directionInfo[topDirection]?["salary"] ?? "-",
+                          ),
+                          _infoRow(
+                            "Talab:",
+                            directionInfo[topDirection]?["demand"] ?? "-",
+                          ),
+                          _infoRow(
+                            "Qiyinlik:",
+                            directionInfo[topDirection]?["difficulty"] ?? "-",
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
 
-                const SizedBox(height: 50),
+                  const SizedBox(height: 30),
 
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    ElevatedButton.icon(
-                      onPressed: () {
-                        quiz.reset();
-                        Navigator.pushReplacement(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => const WelcomeScreen(),
+                  Card(
+                    color: Colors.white.withOpacity(0.18),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Row(
+                            children: [
+                              Icon(Icons.lightbulb,
+                                  color: Colors.amber, size: 30),
+                              SizedBox(width: 10),
+                              Text(
+                                "Qiziqarli faktlar",
+                                style: TextStyle(
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.amber,
+                                ),
+                              ),
+                            ],
                           ),
-                        );
-                      },
-                      icon: const Icon(Icons.restart_alt),
-                      label: const Text("Yana sinash"),
-                    ),
-                    ElevatedButton.icon(
-                      onPressed: () => Share.share(
-                        "Mening IT yo‘nalishim: $topDirection! 🎯\nIT Yo‘lim testidan o‘tdim!",
+                          const SizedBox(height: 16),
+                          if (visibleFacts.isEmpty)
+                            const Text(
+                              "Faktlar topilmadi.",
+                              style: TextStyle(color: Colors.white),
+                            ),
+                          ...visibleFacts.map(
+                                (fact) => Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    "• ",
+                                    style: TextStyle(
+                                      color: Colors.amber,
+                                      fontSize: 22,
+                                      height: 1.4,
+                                    ),
+                                  ),
+                                  Expanded(
+                                    child: Text(
+                                      fact,
+                                      style: const TextStyle(
+                                        fontSize: 16,
+                                        color: Colors.white,
+                                        height: 1.4,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                      icon: const Icon(Icons.share),
-                      label: const Text("Ulashish"),
                     ),
-                  ],
-                ),
-                const SizedBox(height: 40),
-              ],
+                  ),
+
+                  const SizedBox(height: 18),
+
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    spacing: 12,
+                    runSpacing: 12,
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          quiz.reset();
+                          Navigator.pushReplacement(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => const WelcomeScreen()),
+                          );
+                        },
+                        icon: const Icon(Icons.restart_alt),
+                        label: const Text("Yana sinash"),
+                      ),
+                      ElevatedButton.icon(
+                        onPressed: () => shareOrCopy(
+                          context,
+                          "Mening IT yo‘nalishim: $topDirection! 🎯\nIT Yo‘lim testidan o‘tdim!",
+                        ),
+                        icon: const Icon(Icons.share),
+                        label: const Text("Ulashish"),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                ],
+              ),
             ),
           ),
         ),
